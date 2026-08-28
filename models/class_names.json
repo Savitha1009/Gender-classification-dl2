@@ -1,0 +1,11 @@
+{
+    "class_names": [
+        "female",
+        "male"
+    ],
+    "class_to_idx": {
+        "female": 0,
+        "male": 1
+    },
+    "num_classes": 2
+}

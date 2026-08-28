@@ -11,32 +11,17 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 
-# Add root directory to sys.path to allow src imports
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from src.preprocessing import discover_dataset, prepare_splits, create_tf_dataset
+from src.preprocessing import discover_dataset, prepare_splits, create_tf_dataset, get_class_weights_dict
 from src.evaluate import evaluate_and_save_results
 
 def build_mobilenet_model(num_classes, input_shape=(224, 224, 3), learning_rate=1e-3):
     """
     Build Transfer Learning model with MobileNetV2 base + Custom Classifier Head.
-    
-    Architecture:
-      Input (224x224x3)
-           ↓
-      MobileNetV2 (Pre-trained ImageNet, Frozen)
-           ↓
-      GlobalAveragePooling2D
-           ↓
-      Dense(128, activation='relu')
-           ↓
-      Dropout(0.5)
-           ↓
-      Output Layer (Dense(num_classes), Softmax)
     """
-    # Base pretrained model
     base_model = MobileNetV2(
         weights='imagenet',
         include_top=False,
@@ -67,7 +52,6 @@ def plot_history(history, save_path):
     """Plot and save loss and accuracy training metrics over epochs."""
     plt.figure(figsize=(12, 5))
     
-    # Accuracy Plot
     plt.subplot(1, 2, 1)
     plt.plot(history.history['accuracy'], label='Train Accuracy', color='#2b5c8f', linewidth=2)
     plt.plot(history.history['val_accuracy'], label='Val Accuracy', color='#e74c3c', linewidth=2)
@@ -77,7 +61,6 @@ def plot_history(history, save_path):
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.legend()
     
-    # Loss Plot
     plt.subplot(1, 2, 2)
     plt.plot(history.history['loss'], label='Train Loss', color='#2b5c8f', linewidth=2)
     plt.plot(history.history['val_loss'], label='Val Loss', color='#e74c3c', linewidth=2)
@@ -92,15 +75,19 @@ def plot_history(history, save_path):
     plt.close()
     print(f"[Training] Saved loss & accuracy plots to {save_path}")
 
-def run_training(dataset_dir, models_dir, epochs=15, batch_size=32, fine_tune=True):
+def run_training(dataset_dir, models_dir, epochs=15, batch_size=32, fine_tune=True, check_blur=False):
     """
     Main training workflow for MobileNetV2 gender recognition model.
+    Handles all 4 Kaggle dataset formats with dynamic class discovery and class weight balancing.
     """
     os.makedirs(models_dir, exist_ok=True)
     
-    # Step 1: Discover dataset & detect classes dynamically
-    image_paths, numeric_labels, unique_classes, class_to_idx = discover_dataset(dataset_dir)
+    # Step 1: Discover dataset & detect classes dynamically across formats
+    image_paths, numeric_labels, unique_classes, class_to_idx = discover_dataset(dataset_dir, check_blur=check_blur)
     num_classes = len(unique_classes)
+    
+    # Compute balanced class weights for imbalanced datasets
+    class_weights = get_class_weights_dict(numeric_labels)
     
     # Save dynamic class mapping to models directory
     class_names_path = os.path.join(models_dir, 'class_names.json')
@@ -155,6 +142,7 @@ def run_training(dataset_dir, models_dir, epochs=15, batch_size=32, fine_tune=Tr
         train_ds,
         validation_data=val_ds,
         epochs=epochs,
+        class_weight=class_weights,
         callbacks=callbacks
     )
     
@@ -162,7 +150,6 @@ def run_training(dataset_dir, models_dir, epochs=15, batch_size=32, fine_tune=Tr
     if fine_tune:
         print("\n--- PHASE 2: Fine-Tuning Top Layers of Base MobileNetV2 ---")
         base_model.trainable = True
-        # Freeze all layers before layer 100
         for layer in base_model.layers[:100]:
             layer.trainable = False
             
@@ -177,19 +164,17 @@ def run_training(dataset_dir, models_dir, epochs=15, batch_size=32, fine_tune=Tr
             train_ds,
             validation_data=val_ds,
             epochs=ft_epochs,
+            class_weight=class_weights,
             callbacks=callbacks
         )
         
-        # Combine history metrics
         for k in history.history:
             history.history[k].extend(history_ft.history[k])
             
-    # Save training history metrics
     history_json_path = os.path.join(models_dir, 'history.json')
     with open(history_json_path, 'w') as f:
         json.dump(history.history, f, indent=4)
         
-    # Save training plots
     plot_save_path = os.path.join(models_dir, 'training_history.png')
     plot_history(history, plot_save_path)
     
@@ -207,11 +192,11 @@ if __name__ == '__main__':
     parser.add_argument('--models', type=str, default=os.path.join(ROOT_DIR, 'models'), help="Path to save output models")
     parser.add_argument('--epochs', type=int, default=10, help="Number of initial training epochs")
     parser.add_argument('--batch_size', type=int, default=32, help="Batch size")
+    parser.add_argument('--check_blur', action='store_true', help="Filter out blurry images")
     parser.add_argument('--no_fine_tune', action='store_true', help="Disable fine-tuning phase")
     
     args = parser.parse_args()
     
-    # Check if dataset exists, if not, generate sample dataset automatically
     if not os.path.exists(args.dataset) or len(os.listdir(args.dataset)) == 0:
         print("[Notice] Dataset directory is empty. Generating sample dataset automatically...")
         from generate_sample_data import main as generate_sample
@@ -222,5 +207,6 @@ if __name__ == '__main__':
         models_dir=args.models,
         epochs=args.epochs,
         batch_size=args.batch_size,
-        fine_tune=not args.no_fine_tune
+        fine_tune=not args.no_fine_tune,
+        check_blur=args.check_blur
     )
